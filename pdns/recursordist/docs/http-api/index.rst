@@ -29,19 +29,20 @@ The webserver does allow very limited remote management.
 The following webserver related configuration items are available:
 
 * :ref:`setting-yaml-webservice.webserver`: If set to ``yes`` a webserver is launched.
-* :ref:`setting-yaml-webservice.address`: Address to bind the webserver to. Defaults to 127.0.0.1, which implies that only the local computer is able to connect to the nameserver! To allow remote hosts to connect, change to 0.0.0.0 or the physical IP address of your nameserver.
+* :ref:`setting-yaml-webservice.address`: Address to bind the webserver to. Defaults to 127.0.0.1, which implies that only the local computer is able to connect to the nameserver! To allow remote hosts to connect, change to 0.0.0.0 or the physical IP address of your nameserver. Since 5.5.0 a path to a UNIX domain socket can be used instead of an IP address.
 * :ref:`setting-yaml-webservice.password`: If set, viewers will have to enter this password in order to gain access to the statistics.
-* :ref:`setting-yaml-webservice.port`: Port to bind the webserver to.
-* :ref:`setting-yaml-webservice.allow_from`: Netmasks that are allowed to connect to the webserver
+* :ref:`setting-yaml-webservice.port`: Port to bind the webserver to (not relevant if the address is a UNIX domain socket).
+* :ref:`setting-yaml-webservice.allow_from`: Netmasks that are allowed to connect to the webserver (not relevant if the address is a UNIX domain socket).
 
 .. warning::
 
    To achieve defense-in-depth, expose the webserver only to client addresses that have a real need for access.
    Network access is configured by setting :ref:`setting-yaml-webservice.address` and :ref:`setting-yaml-webservice.allow_from`. Starting with version 5.3.0 :ref:`setting-yaml-webservice.listen` has been introduced, superseding :ref:`setting-yaml-webservice.address` if set.
+   For a UNIX domain socket, :ref:`setting-yaml-webservice.allow_from` is not consulted: the permissions of the socket, set with :ref:`setting-yaml-webservice.socket_mode` and :ref:`setting-yaml-webservice.socket_group`, control who can connect.
 
 .. warning::
 
-   Not setting a password will allow passwordless access to the frontpage showing statistics, the :doc:`endpoint-jsonstat`, the :doc:`../common/api/endpoint-statistics` and the ``localhost`` specific endpoint of the :doc:`../common/api/endpoint-servers`.
+   Not setting a password will allow passwordless access to the frontpage showing statistics, the :doc:`endpoint-jsonstat`, the :doc:`../common/api/endpoint-statistics` and the ``localhost`` specific endpoint of the :doc:`../common/api/endpoint-servers`, for every client that is allowed to connect.
 
 Enabling the API
 ----------------

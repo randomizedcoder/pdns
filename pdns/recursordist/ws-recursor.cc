@@ -930,6 +930,12 @@ static void jsonstat(HttpRequest* req, HttpResponse* resp)
   resp->setErrorResult("Command '" + command + "' not found", 404);
 }
 
+// A path selects a UNIX domain socket, as for the auth server
+static bool isUnixSocketPath(const std::string& address)
+{
+  return !address.empty() && address.front() == '/';
+}
+
 void serveRustWeb()
 {
   ::rust::Vec<pdns::rust::web::rec::IncomingWSConfig> config;
@@ -946,8 +952,11 @@ void serveRustWeb()
     }
   }
   if (config.empty()) {
-    auto address = ComboAddress(arg()["webserver-address"], arg().asNum<uint16_t>("webserver-port"));
-    pdns::rust::web::rec::IncomingWSConfig tmp{{::rust::String{address.toStringWithPort()}}, {}};
+    auto address = arg()["webserver-address"];
+    if (!isUnixSocketPath(address)) {
+      address = ComboAddress(address, arg().asNum<uint16_t>("webserver-port")).toStringWithPort();
+    }
+    pdns::rust::web::rec::IncomingWSConfig tmp{{::rust::String{address}}, {}};
     config.emplace_back(tmp);
   }
 
@@ -978,10 +987,24 @@ void serveRustWeb()
   else if (configLevel == "detailed") {
     loglevel = pdns::rust::misc::LogLevel::Detailed;
   }
+  // Mode and group of a UNIX domain socket, resolved here as the Rust side does no name lookups
+  uint32_t socketMode = 0;
+  bool setSocketGid = false;
+  uint32_t socketGid = 0;
+  const bool unixSocket = std::any_of(config.begin(), config.end(), [](const auto& entry) {
+    return std::any_of(entry.addresses.begin(), entry.addresses.end(), [](const auto& address) { return isUnixSocketPath(std::string(address)); });
+  });
+  if (unixSocket) {
+    socketMode = arg().asMode("webserver-socket-mode");
+    setSocketGid = !arg().isEmpty("webserver-socket-group");
+    if (setSocketGid) {
+      socketGid = arg().asGid("webserver-socket-group");
+    }
+  }
   // This function returns after having created the web server object that handles the requests.
   // That object and its runtime are associated with a Posix thread that waits until all tasks are
   // done, which normally never happens. See rec-rust-lib/rust/src/web.rs for details
-  pdns::rust::web::rec::serveweb(config, std::move(password), std::move(apikey), std::move(aclPtr), std::move(logPtr), loglevel, arg().asNum<size_t>("webserver-max-request-size") * 1024ULL * 1024ULL, arg()["cross-origin-request-header"]);
+  pdns::rust::web::rec::serveweb(config, std::move(password), std::move(apikey), std::move(aclPtr), std::move(logPtr), loglevel, arg().asNum<size_t>("webserver-max-request-size") * 1024ULL * 1024ULL, arg()["cross-origin-request-header"], socketMode, setSocketGid, socketGid);
 }
 
 static void fromCxxToRust(const HttpResponse& cxxresp, pdns::rust::web::rec::Response& rustResponse)

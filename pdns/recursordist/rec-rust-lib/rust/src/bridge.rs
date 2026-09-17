@@ -122,6 +122,14 @@ fn is_port_number(str: &str) -> bool {
     str.parse::<u16>().is_ok()
 }
 
+// The webserver also listens on a UNIX domain socket, given as an absolute path
+fn validate_ws_address(field: &str, val: &String) -> Result<(), ValidationError> {
+    if val.starts_with('/') {
+        return Ok(());
+    }
+    validate_socket_address(field, val)
+}
+
 pub fn validate_socket_address_or_name(field: &str, val: &String) -> Result<(), ValidationError> {
     let sa = validate_socket_address(field, val);
     if sa.is_err() && !rustmisc::isValidHostname(val) {
@@ -794,8 +802,19 @@ impl IncomingWSConfig {
         validate_vec(
             &(field.to_string() + ".addresses"),
             &self.addresses,
-            validate_socket_address,
+            validate_ws_address,
         )?;
+        if !self.tls.certificate.is_empty() {
+            for address in &self.addresses {
+                if address.starts_with('/') {
+                    let msg = format!(
+                        "{}: TLS is not available on a UNIX domain socket (`{}')",
+                        field, address
+                    );
+                    return Err(ValidationError { msg });
+                }
+            }
+        }
         Ok(())
     }
 }
