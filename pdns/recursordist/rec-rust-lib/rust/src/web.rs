@@ -31,6 +31,7 @@ TODO
 */
 
 use std::net::SocketAddr;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
 use base64::prelude::*;
 use bytes::Bytes;
@@ -43,7 +44,7 @@ use hyper_util::rt::TokioIo;
 use pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::runtime::Builder;
 use tokio::task::JoinSet;
 
@@ -486,7 +487,7 @@ fn collect_options(
     });
 }
 
-fn log_request(loglevel: rustmisc::LogLevel, request: &rustweb::Request, remote: SocketAddr) {
+fn log_request(loglevel: rustmisc::LogLevel, request: &rustweb::Request, remote: &str) {
     if loglevel != rustmisc::LogLevel::Detailed {
         return;
     }
@@ -527,7 +528,7 @@ fn log_response(
     loglevel: rustmisc::LogLevel,
     logger: &cxx::SharedPtr<rustmisc::Logger>,
     response: &rustweb::Response,
-    remote: SocketAddr,
+    remote: &str,
 ) {
     if loglevel != rustmisc::LogLevel::Detailed {
         return;
@@ -564,7 +565,7 @@ fn log_response(
 async fn process_request(
     rust_request: Request<IncomingBody>,
     ctx: Arc<Context>,
-    remote: SocketAddr,
+    remote: Arc<str>,
 ) -> MyResult<Response<BoxBody>> {
     let unique = rustmisc::getUUID();
     let my_logger = rustmisc::withValue(&ctx.logger, "uniqueid", &unique);
@@ -594,7 +595,7 @@ async fn process_request(
         logger: &my_logger,
     };
 
-    log_request(ctx.loglevel, &request, remote);
+    log_request(ctx.loglevel, &request, &remote);
 
     let mut response = rustweb::Response {
         status: 0,
@@ -725,7 +726,7 @@ async fn process_request(
     if method == Method::HEAD {
         len = 0;
     }
-    log_response(ctx.loglevel, &my_logger, &response, remote);
+    log_response(ctx.loglevel, &my_logger, &response, &remote);
     // Throw away body for HEAD call
     let mut body = full(response.body);
     if method == Method::HEAD {
@@ -785,6 +786,33 @@ async fn process_request(
     }
 
     Ok(rust_response)
+}
+
+// Serve one accepted connection on its own tokio task
+fn spawn_serve<I>(stream: I, remote: Arc<str>, ctx: Arc<Context>, tls: bool)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let io = TokioIo::new(stream);
+    let my_logger = rustmisc::withValue(&ctx.logger, "tls", &tls.to_string());
+    let fut = http1::Builder::new().serve_connection(
+        io,
+        service_fn(move |req| {
+            let ctx = Arc::clone(&ctx);
+            process_request(req, ctx, Arc::clone(&remote))
+        }),
+    );
+    tokio::task::spawn(async move {
+        if let Err(err) = fut.await {
+            rustmisc::error(
+                &my_logger,
+                rustmisc::Priority::Notice,
+                &err.to_string(),
+                "Error serving web connection",
+                &vec![],
+            );
+        }
+    });
 }
 
 async fn serveweb_async(
@@ -858,29 +886,7 @@ async fn serveweb_async(
                     continue;
                 }
             };
-            let io = TokioIo::new(tls_stream);
-            let my_logger = rustmisc::withValue(&ctx.logger, "tls", "true");
-            let fut = http1::Builder::new().serve_connection(
-                io,
-                service_fn(move |req| {
-                    let ctx = Arc::clone(&ctx);
-                    process_request(req, ctx, address)
-                }),
-            );
-
-            // Spawn a tokio task to serve the request
-            tokio::task::spawn(async move {
-                // Finally, we bind the incoming connection to our `process_request` service
-                if let Err(err) = fut.await {
-                    rustmisc::error(
-                        &my_logger,
-                        rustweb::Priority::Notice,
-                        &err.to_string(),
-                        "Error serving web connection",
-                        &vec![],
-                    );
-                }
-            });
+            spawn_serve(tls_stream, Arc::from(address.to_string()), ctx, true);
         }
     } else {
         // We start a loop to continuously accept incoming connections
@@ -917,31 +923,60 @@ async fn serveweb_async(
                     continue; // If we can't determine the peer address, don't
                 }
             }
-            let io = TokioIo::new(stream);
-            let my_logger = rustmisc::withValue(&ctx.logger, "tls", "false");
-            let fut = http1::Builder::new().serve_connection(
-                io,
-                service_fn(move |req| {
-                    let ctx = Arc::clone(&ctx);
-                    process_request(req, ctx, address)
-                }),
-            );
-
-            // Spawn a tokio task to serve the request
-            tokio::task::spawn(async move {
-                // Finally, we bind the incoming connection to our `process_request` service
-                if let Err(err) = fut.await {
-                    rustmisc::error(
-                        &my_logger,
-                        rustmisc::Priority::Notice,
-                        &err.to_string(),
-                        "Error serving web connection",
-                        &vec![],
-                    );
-                }
-            });
+            spawn_serve(stream, Arc::from(address.to_string()), ctx, false);
         }
     }
+}
+
+async fn serveweb_async_unix(
+    listener: UnixListener,
+    path: Arc<str>,
+    ctx: Arc<Context>,
+) -> MyResult<()> {
+    // A UNIX domain socket peer has no address to match against the ACL, the permissions of the
+    // socket control access
+    loop {
+        let (stream, _) = listener.accept().await?;
+        spawn_serve(stream, Arc::clone(&path), Arc::clone(&ctx), false);
+    }
+}
+
+// Create the socket under a temporary name, set its group and mode there and rename it into
+// place, so it never exists at `path` with the wrong permissions
+fn bind_unix(
+    runtime: &tokio::runtime::Runtime,
+    path: &str,
+    mode: u32,
+    gid: Option<u32>,
+) -> std::io::Result<UnixListener> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_socket() {
+            let msg = format!("`{}' exists and is not a socket", path);
+            return Err(std::io::Error::other(msg));
+        }
+    }
+    let tmp = format!("{}.{}", path, std::process::id());
+    if let Err(err) = std::fs::remove_file(&tmp) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err);
+        }
+    }
+    // UnixListener::bind() is synchronous but registers the socket with the tokio reactor
+    let listener = {
+        let _guard = runtime.enter();
+        UnixListener::bind(&tmp)?
+    };
+    let result = (|| {
+        if let Some(gid) = gid {
+            std::os::unix::fs::lchown(&tmp, None, Some(gid))?;
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map(|_| listener)
 }
 
 pub fn serveweb(
@@ -953,7 +988,11 @@ pub fn serveweb(
     loglevel: rustmisc::LogLevel,
     max_request_size: u64,
     cross_origin_request_header: String,
+    socket_mode: u32,
+    set_socket_gid: bool,
+    socket_gid: u32,
 ) -> Result<(), std::io::Error> {
+    let socket_gid = set_socket_gid.then_some(socket_gid);
     // Context, atomically reference counted
     let ctx = Arc::new(Context {
         password_ch,
@@ -977,6 +1016,45 @@ pub fn serveweb(
     let mut set = JoinSet::new();
     for config in incoming {
         for addr_str in &config.addresses {
+            if addr_str.starts_with('/') {
+                let ctx = Arc::clone(&ctx);
+                match bind_unix(&runtime, addr_str, socket_mode, socket_gid) {
+                    Ok(listener) => {
+                        rustmisc::log(
+                            &ctx.logger,
+                            rustweb::Priority::Info,
+                            "Web service listening",
+                            &vec![
+                                rustmisc::KeyValue {
+                                    key: "address".to_string(),
+                                    value: addr_str.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "tls".to_string(),
+                                    value: false.to_string(),
+                                },
+                            ],
+                        );
+                        let path = Arc::from(addr_str.as_str());
+                        set.spawn_on(serveweb_async_unix(listener, path, ctx), runtime.handle());
+                    }
+                    Err(err) => {
+                        rustmisc::error(
+                            &ctx.logger,
+                            rustweb::Priority::Error,
+                            &err.to_string(),
+                            "Unable to bind to web socket",
+                            &vec![rustmisc::KeyValue {
+                                key: "address".to_string(),
+                                value: addr_str.to_string(),
+                            }],
+                        );
+                        let msg = format!("Unable to bind web socket: {}", err);
+                        return Err(std::io::Error::other(msg));
+                    }
+                }
+                continue;
+            }
             let addr = match SocketAddr::from_str(addr_str) {
                 Ok(val) => val,
                 Err(err) => {
@@ -1264,6 +1342,9 @@ mod rustweb {
             loglevel: LogLevel,
             max_request_size: u64,
             cross_origin_request_header: String,
+            socket_mode: u32,
+            set_socket_gid: bool,
+            socket_gid: u32,
         ) -> Result<()>;
     }
 

@@ -3236,14 +3236,25 @@ Start the webserver (for REST API).
         "oldname": "webserver-address",
         "type": LType.String,
         "default": "127.0.0.1",
-        "help": "IP Address of webserver to listen on",
+        "help": "IP address or UNIX domain socket path of webserver to listen on",
         "doc": """
 IP address for the webserver to listen on.
+An absolute path makes the webserver listen on a UNIX domain socket instead. In that case
+:ref:`setting-webserver-port` and :ref:`setting-webserver-allow-from` are not used: who can
+connect is decided by the permissions of the socket, see :ref:`setting-webserver-socket-mode` and
+:ref:`setting-webserver-socket-group`. TLS is not available on a UNIX domain socket.
+:ref:`setting-webserver-password` and :ref:`setting-api-key` apply as usual.
 """,
         "doc-new": """
 IP address for the webserver to listen on.
+An absolute path makes the webserver listen on a UNIX domain socket instead. In that case
+:ref:`setting-yaml-webservice.port` and :ref:`setting-yaml-webservice.allow_from` are not used: who can
+connect is decided by the permissions of the socket, see :ref:`setting-yaml-webservice.socket_mode` and
+:ref:`setting-yaml-webservice.socket_group`. TLS is not available on a UNIX domain socket.
+:ref:`setting-yaml-webservice.password` and :ref:`setting-yaml-webservice.api_key` apply as usual.
 This field is ignored if :ref:`setting-yaml-webservice.listen` is set.
 """,
+        "versionchanged": ("5.5.0", "A path to a UNIX domain socket may be used instead of an IP address."),
     },
     {
         "name": "listen",
@@ -3254,9 +3265,11 @@ This field is ignored if :ref:`setting-yaml-webservice.listen` is set.
         "doc": """
 IP addresses and associated attributes for the webserver to listen on.
 If this setting has a non-default value, :ref:`setting-yaml-webservice.address` and :ref:`setting-yaml-webservice.port` will be ignored. Note multiple listen addresses can be configured and https is supported as well, in contrast to earlier (pre 5.3.0) versions.
+An address that is an absolute path is a UNIX domain socket, see :ref:`setting-yaml-webservice.address`.
  """,
         "skip-old": "No equivalent old-style setting",
         "versionadded": "5.3.0",
+        "versionchanged": ("5.5.0", "A path to a UNIX domain socket may be used instead of an IP address."),
     },
     {
         "name": "allow_from",
@@ -3332,6 +3345,34 @@ TCP port where the webserver should listen on.
 TCP port where the webserver should listen on.
 This field is ignored if :ref:`setting-yaml-webservice.listen` is set.
  """,
+    },
+    {
+        "name": "socket_group",
+        "section": "webservice",
+        "oldname": "webserver-socket-group",
+        "type": LType.String,
+        "default": "",
+        "help": "Group of the webserver UNIX domain socket",
+        "doc": """
+Group of the UNIX domain socket the webserver listens on, by name or numeric id.
+The group is set after privileges have been dropped, so the user the recursor runs as must be a member of it.
+If empty, the socket gets the group of the recursor process.
+ """,
+        "versionadded": "5.5.0",
+    },
+    {
+        "name": "socket_mode",
+        "section": "webservice",
+        "oldname": "webserver-socket-mode",
+        "type": LType.String,
+        "default": "0660",
+        "help": "Mode of the webserver UNIX domain socket",
+        "doc": """
+Mode (in octal) of the UNIX domain socket the webserver listens on.
+Together with :ref:`setting-webserver-socket-group` this decides who can connect to the webserver, as :ref:`setting-webserver-allow-from` does not apply to a UNIX domain socket.
+Note that with :ref:`setting-chroot` the socket path is relative to the chroot.
+ """,
+        "versionadded": "5.5.0",
     },
     {
         "name": "max_request_size",
